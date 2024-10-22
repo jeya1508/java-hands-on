@@ -1,16 +1,21 @@
 package org.example.producerconsumer;
 
 import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.Serializable;
 import java.nio.file.*;
 import java.util.Arrays;
 import java.util.Scanner;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
-class CircularBlockingQueue<T> {
+class CircularBlockingQueue<T> implements Serializable {
+    private static final long serialVersionUID = 1L;
+
     private final T[] producerQueue;
     private final T[] consumerQueue;
     private final int capacity;
@@ -26,28 +31,20 @@ class CircularBlockingQueue<T> {
     private final Lock lock = new ReentrantLock();
     private final Condition notEmpty = lock.newCondition();
 
-    private static final Path FILE_PATH = Paths.get("data_buffer.txt");
+    private static final Path FILE_PATH = Paths.get("queue_data_array.ser");
 
     public CircularBlockingQueue(int capacity) {
         this.capacity = capacity;
         this.producerQueue = (T[]) new Object[capacity];
         this.consumerQueue = (T[]) new Object[capacity];
-
-        try {
-            if (!Files.exists(FILE_PATH)) {
-                Files.createFile(FILE_PATH);
-            }
-        } catch (IOException e) {
-            System.out.println("Error in creating the file: " + e.getMessage());
-        }
     }
 
     public void produce(T item) {
         lock.lock();
         try {
             while (producerSize == capacity) {
-                System.out.println("Producer queue full, writing to file.");
-                writeProducerQueueToFile();
+                System.out.println("Producer queue full, serializing to file.");
+                serializeProducerQueueToFile();
                 notEmpty.signal();
             }
             producerQueue[producerRear] = item;
@@ -63,8 +60,8 @@ class CircularBlockingQueue<T> {
         lock.lock();
         try {
             while (consumerSize == 0) {
-                System.out.println("Consumer queue empty, waiting for data from file...");
-                fillConsumerQueueFromFile();
+                System.out.println("Consumer queue empty, deserializing from file...");
+                deserializeToConsumerQueueFromFile();
                 if (consumerSize == 0) {
                     notEmpty.await();
                 }
@@ -81,57 +78,44 @@ class CircularBlockingQueue<T> {
         }
     }
 
-    private void writeProducerQueueToFile() {
+    private void serializeProducerQueueToFile() {
         lock.lock();
-        try (FileChannel fileChannel = FileChannel.open(FILE_PATH, StandardOpenOption.WRITE, StandardOpenOption.CREATE, StandardOpenOption.APPEND)) {
-            for (int i = 0; i < producerSize; i++) {
-                int index = (producerFront + i) % capacity;
-                ByteBuffer buffer = ByteBuffer.wrap((producerQueue[index].toString() + "\n").getBytes());
-                fileChannel.write(buffer);
-            }
+        try (ObjectOutputStream oos = new ObjectOutputStream(Files.newOutputStream(FILE_PATH, StandardOpenOption.CREATE, StandardOpenOption.WRITE))) {
+            oos.writeObject(Arrays.copyOfRange(producerQueue, producerFront, producerFront + producerSize));
             producerFront = 0;
             producerRear = 0;
             producerSize = 0;
-            System.out.println("Producer queue contents written to file.");
+            System.out.println("Serialized producer queue to file.");
         } catch (IOException e) {
-            System.out.println("Error in writing contents to the file: " + e.getMessage());
+            System.out.println("Error during serialization: " + e.getMessage());
         } finally {
             lock.unlock();
         }
     }
 
-    private void fillConsumerQueueFromFile() {
+    private void deserializeToConsumerQueueFromFile() {
         lock.lock();
-        try (FileChannel fileChannel = FileChannel.open(FILE_PATH, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
-            ByteBuffer buffer = ByteBuffer.allocate(1024);
-            int bytesRead = fileChannel.read(buffer);
-            buffer.flip();
-
-            if (bytesRead == -1) {
-                return;
+        try (ObjectInputStream ois = new ObjectInputStream(Files.newInputStream(FILE_PATH))) {
+            T[] deserializedArray = (T[]) ois.readObject();
+            for (int i = 0; i < deserializedArray.length && i < capacity; i++) {
+                consumerQueue[consumerRear] = deserializedArray[i];
+                consumerRear = (consumerRear + 1) % capacity;
+                consumerSize++;
             }
-
-            StringBuilder itemBuilder = new StringBuilder();
-            while (buffer.hasRemaining()) {
-                itemBuilder.append((char) buffer.get());
-            }
-
-            String[] lines = itemBuilder.toString().split("\n");
-            for (String line : lines) {
-                if (!line.trim().isEmpty() && consumerSize < capacity) {
-                    T item = (T) Integer.valueOf(line.trim());
-                    consumerQueue[consumerRear] = item;
-                    consumerRear = (consumerRear + 1) % capacity;
-                    consumerSize++;
-                }
-            }
-
-            fileChannel.truncate(0);
-            System.out.println("Filled consumer queue from file. Current consumer queue: " + Arrays.toString(consumerQueue));
-        } catch (IOException e) {
-            System.out.println("Error while reading from the file: " + e.getMessage());
+            System.out.println("Deserialized consumer queue from file. Current consumer queue: " + Arrays.toString(consumerQueue));
+        } catch (IOException | ClassNotFoundException e) {
+            System.out.println("Error during deserialization: " + e.getMessage());
         } finally {
             lock.unlock();
+        }
+    }
+    public void viewSerializedData(){
+        try (ObjectInputStream ois = new ObjectInputStream(Files.newInputStream(Paths.get(FILE_PATH.toUri())))) {
+            Object[] deserializedArray = (Object[]) ois.readObject();
+            System.out.println("Deserialized contents of the file:");
+            System.out.println(Arrays.toString(deserializedArray));
+        } catch (IOException | ClassNotFoundException e) {
+            System.out.println("Error during deserialization: " + e.getMessage());
         }
     }
 }
@@ -151,6 +135,7 @@ class ProducerImpl implements Runnable {
         while (true) {
             item++;
             producerQueue.produce(item + id * 100);
+            producerQueue.viewSerializedData();
             try {
                 Thread.sleep(500); // Simulate production time
             } catch (InterruptedException e) {
@@ -172,17 +157,20 @@ class ConsumerImpl implements Runnable {
         while (true) {
             try {
                 consumerQueue.consume();
+                consumerQueue.viewSerializedData();
                 Thread.sleep(1000);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
         }
     }
+
 }
 
 class Main {
     public static void main(String[] args) {
         Scanner scanner = new Scanner(System.in);
+
         System.out.print("Enter number of producers: ");
         int numProducers = scanner.nextInt();
 
@@ -194,13 +182,17 @@ class Main {
 
         CircularBlockingQueue<Integer> queue = new CircularBlockingQueue<>(capacity);
 
+        int totalThreads = numProducers + numConsumers;
+        ExecutorService threadPool = Executors.newFixedThreadPool(totalThreads);
+
         for (int i = 1; i <= numProducers; i++) {
-            Thread producer = new Thread(new ProducerImpl(queue, i));
-            producer.start();
+            threadPool.submit(new ProducerImpl(queue, i));
         }
+
         for (int i = 1; i <= numConsumers; i++) {
-            Thread consumer = new Thread(new ConsumerImpl(queue));
-            consumer.start();
+            threadPool.submit(new ConsumerImpl(queue));
         }
+
+        threadPool.shutdown();
     }
 }
