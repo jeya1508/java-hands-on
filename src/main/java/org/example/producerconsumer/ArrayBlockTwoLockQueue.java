@@ -4,7 +4,10 @@ import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.Serializable;
-import java.nio.file.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.Scanner;
 import java.util.concurrent.ExecutorService;
@@ -13,8 +16,8 @@ import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
-class CircularBlockingQueue<T> implements Serializable {
-    private static final long serialVersionUID = 1L;
+public class ArrayBlockTwoLockQueue<T> implements Serializable {
+    private static final long serialVersionUID = 12L;
 
     private final T[] producerQueue;
     private final T[] consumerQueue;
@@ -28,77 +31,93 @@ class CircularBlockingQueue<T> implements Serializable {
     private int consumerRear = 0;
     private int consumerSize = 0;
 
-    private final Lock lock = new ReentrantLock();
-    private final Condition notEmpty = lock.newCondition();
+    private final Lock producerLock = new ReentrantLock();
+    private final Lock consumerLock = new ReentrantLock();
 
-    private static final Path FILE_PATH = Paths.get("queue_data_array_one.ser");
+    private final Condition notEmptyConsumer = consumerLock.newCondition();
 
-    public CircularBlockingQueue(int capacity) {
+    private static final Path FILE_PATH = Paths.get("queue_data_array_two_nofile.ser");
+
+    public ArrayBlockTwoLockQueue(int capacity) {
         this.capacity = capacity;
         this.producerQueue = (T[]) new Object[capacity];
         this.consumerQueue = (T[]) new Object[capacity];
     }
 
     public void produce(T item) {
-        long start = System.nanoTime();
-        lock.lock();
+        long startTime = System.nanoTime();
+        producerLock.lock();
         try {
             while (producerSize == capacity) {
                 System.out.println("Producer queue full, serializing to file.");
                 serializeProducerQueueToFile();
-                notEmpty.signal();
+                consumerLock.lock();
+                try {
+                    notEmptyConsumer.signal();
+                } finally {
+                    consumerLock.unlock();
+                }
             }
             producerQueue[producerRear] = item;
             producerRear = (producerRear + 1) % capacity;
             producerSize++;
-            long end = System.nanoTime();
-            System.out.println("Produced item: " + item + ", Time taken: " + (end - start) + " nanoseconds");
+            long endTime = System.nanoTime();
+            System.out.println("Produced item: " + item + ", Time taken: " + (endTime - startTime) + " nanoseconds");
+
+
         } finally {
-            lock.unlock();
+            producerLock.unlock();
         }
     }
 
     public void consume() {
-        long start = System.nanoTime();
-        lock.lock();
+        long startTime = System.nanoTime();
+        consumerLock.lock();
         try {
             while (consumerSize == 0) {
                 System.out.println("Consumer queue empty, deserializing from file...");
                 deserializeToConsumerQueueFromFile();
                 if (consumerSize == 0) {
-                    notEmpty.await();
+                    System.out.println("Consumer waiting for signal...");
+                    notEmptyConsumer.await();
+
                 }
+
             }
+            System.out.println("Consumer woke up, checking for items...");
             T item = consumerQueue[consumerFront];
             consumerQueue[consumerFront] = null;
             consumerFront = (consumerFront + 1) % capacity;
             consumerSize--;
-            long end = System.nanoTime();
-            System.out.println("Consumed item: " + item + ", Time taken: " + (end - start) + " nanoseconds");
+            long endTime = System.nanoTime();
+            System.out.println("Consumed item: " + item + ", Time taken: " + (endTime - startTime) + " nanoseconds");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } finally {
-            lock.unlock();
+            System.out.println("Consumer releasing lock.");
+            consumerLock.unlock();
         }
     }
 
     private void serializeProducerQueueToFile() {
-        lock.lock();
+        producerLock.lock();
         try (ObjectOutputStream oos = new ObjectOutputStream(Files.newOutputStream(FILE_PATH, StandardOpenOption.CREATE, StandardOpenOption.WRITE))) {
             oos.writeObject(Arrays.copyOfRange(producerQueue, producerFront, producerFront + producerSize));
             producerFront = 0;
             producerRear = 0;
             producerSize = 0;
             System.out.println("Serialized producer queue to file.");
+
         } catch (IOException e) {
             System.out.println("Error during serialization: " + e.getMessage());
         } finally {
-            lock.unlock();
+            producerLock.unlock();
         }
     }
 
+
     private void deserializeToConsumerQueueFromFile() {
-        lock.lock();
+        consumerLock.lock();
         try {
             if (Files.exists(FILE_PATH) && Files.size(FILE_PATH) > 0) {
                 try (ObjectInputStream ois = new ObjectInputStream(Files.newInputStream(FILE_PATH))) {
@@ -132,8 +151,8 @@ class CircularBlockingQueue<T> implements Serializable {
             }
         } catch (IOException e) {
             System.out.println("Error accessing the file: "+ e.getMessage());
-        } finally {
-            lock.unlock();
+        }finally {
+            consumerLock.unlock();
         }
     }
     public void viewSerializedData(){
@@ -146,11 +165,12 @@ class CircularBlockingQueue<T> implements Serializable {
         }
     }
 }
-
-class ProducerImpl implements Runnable {
-    private final CircularBlockingQueue<Integer> producerQueue;
+class ArrayBlockTwoLockProducer implements Runnable
+{
+    private final ArrayBlockTwoLockQueue<Integer> producerQueue;
     private final int id;
-    public ProducerImpl(CircularBlockingQueue<Integer> queue, int id) {
+
+    public ArrayBlockTwoLockProducer(ArrayBlockTwoLockQueue<Integer> queue, int id) {
         this.producerQueue = queue;
         this.id = id;
     }
@@ -163,17 +183,18 @@ class ProducerImpl implements Runnable {
             producerQueue.produce(item + id * 100);
 //            producerQueue.viewSerializedData();
             try {
-                Thread.sleep(500); // Simulate production time
+                Thread.sleep(500);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
         }
     }
 }
+class ArrayBlockTwoLockConsumer implements Runnable
+{
+    private final ArrayBlockTwoLockQueue<Integer> consumerQueue;
 
-class ConsumerImpl implements Runnable {
-    private final CircularBlockingQueue<Integer> consumerQueue;
-    public ConsumerImpl(CircularBlockingQueue<Integer> queue) {
+    public ArrayBlockTwoLockConsumer(ArrayBlockTwoLockQueue<Integer> queue) {
         this.consumerQueue = queue;
     }
 
@@ -189,10 +210,9 @@ class ConsumerImpl implements Runnable {
             }
         }
     }
-
 }
-
-class Main {
+class ArrayBlockTwoLockMain
+{
     public static void main(String[] args) {
         Scanner scanner = new Scanner(System.in);
 
@@ -205,19 +225,17 @@ class Main {
         System.out.print("Enter the capacity for queues: ");
         int capacity = scanner.nextInt();
 
-        CircularBlockingQueue<Integer> queue = new CircularBlockingQueue<>(capacity);
-
+        ArrayBlockTwoLockQueue<Integer> blockingQueue = new ArrayBlockTwoLockQueue<>(capacity);
         int totalThreads = numProducers + numConsumers;
         ExecutorService threadPool = Executors.newFixedThreadPool(totalThreads);
 
         for (int i = 1; i <= numProducers; i++) {
-            threadPool.submit(new ProducerImpl(queue, i));
+            threadPool.submit(new ArrayBlockTwoLockProducer(blockingQueue,i));
         }
-
-        for (int i = 1; i <= numConsumers; i++) {
-            threadPool.submit(new ConsumerImpl(queue));
+        for (int i = 1; i <= numConsumers ; i++) {
+            threadPool.submit(new ArrayBlockTwoLockConsumer(blockingQueue));
         }
-
         threadPool.shutdown();
+
     }
 }
