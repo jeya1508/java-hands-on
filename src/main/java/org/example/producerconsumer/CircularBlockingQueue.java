@@ -6,16 +6,17 @@ import java.io.ObjectOutputStream;
 import java.io.Serializable;
 import java.nio.file.*;
 import java.util.Arrays;
-import java.util.Scanner;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
 class CircularBlockingQueue<T> implements Serializable {
     private static final long serialVersionUID = 1L;
-
+    private final ScheduledExecutorService scheduler;
     private final T[] producerQueue;
     private final T[] consumerQueue;
     private final int capacity;
@@ -38,6 +39,13 @@ class CircularBlockingQueue<T> implements Serializable {
         this.capacity = capacity;
         this.producerQueue = (T[]) new Object[capacity];
         this.consumerQueue = (T[]) new Object[capacity];
+        this.scheduler = Executors.newScheduledThreadPool(2,runnable ->{
+            Thread thread = Executors.defaultThreadFactory().newThread(runnable);
+            thread.setDaemon(true);
+            return thread;
+        });
+        startSerializationDaemon();
+        startDeserializationDaemon();
     }
 
     public void produce(T item) {
@@ -85,8 +93,7 @@ class CircularBlockingQueue<T> implements Serializable {
     }
 
     public void startSerializationDaemon() {
-        Thread serializationThread = new Thread(() -> {
-            while (true) {
+        scheduler.scheduleWithFixedDelay(()->{
                 lock.lock();
                 try {
                     while (producerSize < capacity) {
@@ -102,15 +109,11 @@ class CircularBlockingQueue<T> implements Serializable {
                 } finally {
                     lock.unlock();
                 }
-            }
-        });
-        serializationThread.setDaemon(true); 
-        serializationThread.start();
+            },0,1, TimeUnit.SECONDS);
     }
 
     public void startDeserializationDaemon() {
-        Thread deserializationThread = new Thread(() -> {
-            while (true) {
+            scheduler.scheduleWithFixedDelay(()->{
                 lock.lock();
                 try {
                     while (consumerSize > 0 || Files.size(FILE_PATH) == 0) {
@@ -123,10 +126,7 @@ class CircularBlockingQueue<T> implements Serializable {
                 } finally {
                     lock.unlock();
                 }
-            }
-        });
-        deserializationThread.setDaemon(true);
-        deserializationThread.start();
+            },0,1,TimeUnit.SECONDS);
     }
 
     private void serializeProducerQueueToFile() {
@@ -204,6 +204,17 @@ class CircularBlockingQueue<T> implements Serializable {
             System.out.println("Error during deserialization: " + e.getMessage());
         }
     }
+    public void shutdownService() {
+        scheduler.shutdown();
+        try {
+            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                scheduler.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            scheduler.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+    }
 }
 
 class ProducerImpl implements Runnable {
@@ -256,12 +267,11 @@ class Main {
         System.out.println("Start of application "+System.nanoTime());
 
         CircularBlockingQueue<Integer> queue = new CircularBlockingQueue<>(3);
-        queue.startSerializationDaemon();
-        queue.startDeserializationDaemon();
         ExecutorService threadPool = Executors.newFixedThreadPool(2);
 
         threadPool.submit(new ProducerImpl(queue, 1));
         threadPool.submit(new ConsumerImpl(queue));
         threadPool.shutdown();
+        queue.shutdownService();
     }
 }

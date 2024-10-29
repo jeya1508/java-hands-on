@@ -12,13 +12,15 @@ import java.util.Arrays;
 import java.util.Scanner;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
 public class ArrayBlockQueue<T> implements Serializable {
     private static final long serialVersionUID = 123L;
-
+    private final ScheduledExecutorService scheduler;
     private final T[] producerQueue;
     private final T[] consumerQueue;
     private final int capacity;
@@ -42,7 +44,11 @@ public class ArrayBlockQueue<T> implements Serializable {
         this.capacity = capacity;
         this.producerQueue = (T[]) new Object[capacity];
         this.consumerQueue = (T[]) new Object[capacity];
-
+        this.scheduler = Executors.newScheduledThreadPool(2, runnable -> {
+            Thread thread = Executors.defaultThreadFactory().newThread(runnable);
+            thread.setDaemon(true);
+            return thread;
+        });
         startSerializationDaemon();
         startDeserializationDaemon();
     }
@@ -94,45 +100,36 @@ public class ArrayBlockQueue<T> implements Serializable {
     }
 
     private void startSerializationDaemon() {
-        Thread serializationThread = new Thread(() -> {
-            while (true) {
-                queueLock.lock();
-                try {
-                    while (producerSize < capacity) {
-                        notFull.await();
-                    }
-                    serializeProducerQueueToFile();
-                    notEmpty.signalAll();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                } finally {
-                    queueLock.unlock();
+        scheduler.scheduleWithFixedDelay(() -> {
+            queueLock.lock();
+            try {
+                while (producerSize < capacity) {
+                    notFull.await();
                 }
+                serializeProducerQueueToFile();
+                notEmpty.signalAll();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                queueLock.unlock();
             }
-        });
-        serializationThread.setDaemon(true);
-        serializationThread.start();
+        }, 0, 1, TimeUnit.SECONDS);
     }
 
     private void startDeserializationDaemon() {
-        Thread deserializationThread = new Thread(() -> {
-            while (true) {
-                queueLock.lock();
-                try {
-                    while (consumerSize > 0 || !Files.exists(FILE_PATH) || Files.size(FILE_PATH) == 0) {
-                        notEmpty.await();
-                    }
-                    deserializeToConsumerQueueFromFile();
-                    Thread.sleep(1000);
-                } catch (InterruptedException | IOException e) {
-                    Thread.currentThread().interrupt();
-                } finally {
-                    queueLock.unlock();
+        scheduler.scheduleWithFixedDelay(() -> {
+            queueLock.lock();
+            try {
+                while (consumerSize > 0 || !Files.exists(FILE_PATH) || Files.size(FILE_PATH) == 0) {
+                    notEmpty.await();
                 }
+                deserializeToConsumerQueueFromFile();
+            } catch (InterruptedException | IOException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                queueLock.unlock();
             }
-        });
-        deserializationThread.setDaemon(true);
-        deserializationThread.start();
+        }, 0, 1, TimeUnit.SECONDS);
     }
 
     private void serializeProducerQueueToFile() {
@@ -201,6 +198,17 @@ public class ArrayBlockQueue<T> implements Serializable {
             System.out.println("Error during deserialization: " + e.getMessage());
         }
     }
+    public void shutdownService() {
+        scheduler.shutdown();
+        try {
+            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                scheduler.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            scheduler.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+    }
 }
 
 class ArrayBlockProducer implements Runnable
@@ -260,5 +268,6 @@ class ArrayBlockMain
         threadPool.submit(new ArrayBlockProducer(arrayBlockQueue,1));
         threadPool.submit(new ArrayBlockConsumer(arrayBlockQueue));
         threadPool.shutdown();
+        arrayBlockQueue.shutdownService();
     }
 }

@@ -11,12 +11,15 @@ import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
 public class TwoLockBlockingQueue<T> implements Serializable {
     private static final long serialVersionUID = 12L;
+    private final ScheduledExecutorService scheduler;
     private final T[] producerQueue;
     private final T[] consumerQueue;
     private final int capacity;
@@ -42,6 +45,11 @@ public class TwoLockBlockingQueue<T> implements Serializable {
         this.capacity = capacity;
         this.producerQueue = (T[]) new Object[capacity];
         this.consumerQueue = (T[]) new Object[capacity];
+        this.scheduler = Executors.newScheduledThreadPool(2,runnable -> {
+            Thread thread = Executors.defaultThreadFactory().newThread(runnable);
+            thread.setDaemon(true);
+            return thread;
+        });
         startDaemonThreads();
     }
 
@@ -140,8 +148,7 @@ public class TwoLockBlockingQueue<T> implements Serializable {
     }
 
     private void startDaemonThreads() {
-        Thread serializationThread = new Thread(() -> {
-            while (true) {
+        scheduler.scheduleWithFixedDelay(()->{
                 producerLock.lock();
                 try {
                     if (producerSize == capacity) {
@@ -156,13 +163,10 @@ public class TwoLockBlockingQueue<T> implements Serializable {
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
-            }
-        });
-        serializationThread.setDaemon(true);
-        serializationThread.start();
+            },0,1, TimeUnit.SECONDS);
 
-        Thread deserializationThread = new Thread(() -> {
-            while (true) {
+
+        scheduler.scheduleWithFixedDelay(()->{
                 consumerLock.lock();
                 try {
                     if (consumerSize == 0) {
@@ -177,10 +181,8 @@ public class TwoLockBlockingQueue<T> implements Serializable {
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
-            }
-        });
-        deserializationThread.setDaemon(true);
-        deserializationThread.start();
+            },0,1,TimeUnit.SECONDS);
+
     }
 
     public void viewSerializedData() {
@@ -190,6 +192,17 @@ public class TwoLockBlockingQueue<T> implements Serializable {
             System.out.println(Arrays.toString(deserializedArray));
         } catch (IOException | ClassNotFoundException e) {
             System.out.println("Error during deserialization: " + e.getMessage());
+        }
+    }
+    public void shutdownService() {
+        scheduler.shutdown();
+        try {
+            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                scheduler.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            scheduler.shutdownNow();
+            Thread.currentThread().interrupt();
         }
     }
 }
@@ -252,6 +265,7 @@ class TwoLockMain
         threadPool.submit(new TwoLockProducerImpl(blockingQueue,1));
         threadPool.submit(new TwoLockConsumerImpl(blockingQueue));
         threadPool.shutdown();
+        blockingQueue.shutdownService();
 
     }
 }
